@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: raw
+    description: ingestion/load_raw.py 從 landing 載入的 bronze 表
+    database: iceberg
+    schema: raw
+    tables:
+      - name: ga4_events
+        description: GA4 BigQuery export 格式的原始事件，以 event_date 分區
+        columns:
+          - name: event_name
+            data_tests: [not_null]
+          - name: user_pseudo_id
+            data_tests: [not_null]

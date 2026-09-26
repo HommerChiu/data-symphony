@@ -1,0 +1,23 @@
+name: ga4_lakehouse
+version: "0.1.0"
+profile: ga4_lakehouse
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+vars:
+  # 增量模型每次往回重算幾天（GA4 事件可能晚到）
+  lookback_days: 3
+  site_timezone: "Asia/Taipei"
+
+models:
+  ga4_lakehouse:
+    staging:
+      +schema: staging
+    marts:
+      +schema: marts
+      +materialized: table
+
+flags:
+  require_certificate_validation: true

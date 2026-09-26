@@ -1,0 +1,14 @@
+# 用法：DBT_PROFILES_DIR=dbt dbt build --project-dir dbt （Makefile 已經包好）
+ga4_lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: none
+      user: dbt
+      host: "{{ env_var('TRINO_HOST', 'localhost') }}"
+      port: "{{ env_var('TRINO_PORT', '8080') | int }}"
+      http_scheme: http
+      catalog: iceberg
+      schema: analytics
+      threads: 4
