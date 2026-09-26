@@ -11,6 +11,9 @@ POLARIS_URI = os.environ.get("POLARIS_URI", "http://localhost:8181/api/catalog")
 POLARIS_CREDENTIAL = os.environ.get("POLARIS_CREDENTIAL", "root:s3cr3t")
 CATALOG = os.environ.get("POLARIS_CATALOG", "lakehouse")
 
+# landing bucket 裡的路徑，layout 跟 event-maestro 的輸出一樣：event_date=YYYY-MM-DD/*.jsonl
+LANDING_PREFIX = "landing/ga4_events"
+
 
 def landing_fs():
     """landing bucket 用的 pyarrow S3 檔案系統。"""

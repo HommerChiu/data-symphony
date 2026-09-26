@@ -15,8 +15,11 @@
 
 ## 分層與 idempotency
 
+- **本機 → landing**：`upload_landing.py` 原樣鏡像 event-maestro 的檔案，同名覆蓋。
 - **landing → bronze**：`load_raw.py` 以 `event_date` 為單位 `overwrite`（先刪該分區再寫入，一個 Iceberg snapshot 完成），
-  同一天重跑結果一樣。產生器用固定檔名 `generated-seed<seed>.jsonl`，重跑也是覆蓋。
+  同一天重跑結果一樣。
+- **重複事件**：event-maestro 可以故意寫入完全相同的列（`--duplicate-rate`）。bronze 保留原樣（raw 就是 raw），
+  staging 用 `row_number() over (partition by event_key)` 只留一筆。Trino 沒有 `QUALIFY`，所以包一層子查詢。
 - **bronze → silver**：`stg_ga4__events` 是 incremental `merge`，每次只重算最近 `lookback_days`（預設 3）天，
   用 `event_key`（user、時間、事件名稱、參數的 md5）merge，晚到的事件會被補進來、不會重複。
 - **silver → gold**：marts 資料量小，直接 `table` 全量重建。
@@ -64,5 +67,6 @@ Polaris bootstrap 後的 `root` principal 有 `service_admin`，能建 catalog�
 
 - **Session 不是單一欄位**：GA4 的 session 要用 `user_pseudo_id` + `ga_session_id`（在 `event_params` 裡）組合才唯一。
 - **`event_params` 是 key-value 陣列**：staging 先用 `map_from_entries` 轉成 map，再用 `ga4_param()` macro 取值，比每個參數都 `unnest` 一次便宜。
-- **Engaged session**：GA4 定義為互動 ≥ 10 秒、或 ≥ 2 個 page_view、或有轉換事件。`fct_sessions.is_engaged` 照這個定義算。
-- **`traffic_source` vs `collected_traffic_source`**：前者是使用者**第一次**來的來源，後者是**這次** session 的來源。
+- **Engaged session**：GA4 定義為互動 ≥ 10 秒、或 ≥ 2 個 page_view、或有轉換事件。event-maestro 把結果放在 `engaged_session_event` 參數，`fct_sessions.is_engaged` 取 session 內任一事件為 1。
+- **閱讀進度**：`read_progress` 在 25 / 50 / 75 / 100% 各送一次，文章漏斗用「幾個 session 讀到」計算，避免重整頁面重複計數。
+- **`traffic_source` vs `collected_traffic_source`**：前者是使用者**第一次**來的來源，後者是**這次** session 的 UTM，只出現在 session 開頭的事件，沒有值就當 `(direct) / (none)`。

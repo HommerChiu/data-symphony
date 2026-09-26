@@ -9,12 +9,12 @@
 ```mermaid
 flowchart LR
     subgraph sources[資料來源]
-        EM[event-maestro 網站]
-        GEN[generate_events.py<br/>假資料產生器]
+        EM[event-maestro<br/>網站 + 產生器]
+        LOCAL[(本機檔案<br/>data/raw/ga4_events/)]
     end
 
     subgraph storage[RustFS · S3 相容儲存]
-        L[(landing bucket<br/>ga4/event_date=YYYYMMDD/*.jsonl)]
+        L[(landing bucket<br/>ga4_events/event_date=YYYY-MM-DD/*.jsonl)]
         W[(warehouse bucket<br/>Iceberg data + metadata)]
     end
 
@@ -23,8 +23,8 @@ flowchart LR
     T[Trino]
     DBT[dbt-trino]
 
-    EM --> L
-    GEN --> L
+    EM --> LOCAL
+    LOCAL -- upload_landing.py --> L
     L -- load_raw.py<br/>pyiceberg --> W
     P --- PG
     P -. 管理表的 metadata .- W
@@ -35,9 +35,9 @@ flowchart LR
 
 | 層 | 位置 | 誰產生 | 說明 |
 |---|---|---|---|
-| landing | `s3://landing/ga4/event_date=YYYYMMDD/*.jsonl` | event-maestro / `generate_events.py` | GA4 BigQuery export 格式，一行一個事件 |
+| landing | `s3://landing/ga4_events/event_date=YYYY-MM-DD/*.jsonl` | `ingestion/upload_landing.py` | event-maestro 輸出的原樣鏡像，GA4 BigQuery export 格式 |
 | bronze | `iceberg.raw.ga4_events` | `ingestion/load_raw.py` | 原封不動的巢狀結構，以 `event_date` 分區，每天整區 overwrite |
-| silver | `iceberg.staging.stg_ga4__events` | dbt（incremental merge） | 攤平 `event_params`、轉時區、產生 `event_key` / `session_key` |
+| silver | `iceberg.staging.stg_ga4__events` | dbt（incremental merge） | 攤平 `event_params`、轉時區、去除重複列、產生 `event_key` / `session_key` |
 | gold | `iceberg.marts.*` | dbt（table） | `fct_sessions`、`dim_users`、`fct_article_daily`、`fct_search_terms_daily` |
 
 | 服務 | 網址 | 帳密 |
@@ -50,20 +50,24 @@ flowchart LR
 
 ## 快速開始
 
-需要 Docker（含 compose）與 Python 3.11+。
+需要 Docker（含 compose）、Python 3.11+，以及放在旁邊的 [event-maestro](https://github.com/HommerChiu/event-maestro) checkout
+（預設路徑 `../event-maestro`，可以用 `EVENT_MAESTRO_DIR=...` 改）。
 
 ```bash
 make up          # 啟動 RustFS、Postgres、Polaris、Trino，並建立 bucket 與 catalog
 make install     # 建立 .venv，安裝 pyiceberg 與 dbt-trino
-make pipeline    # 產生 7 天假資料 -> 載入 bronze -> dbt build（含測試）
+make pipeline    # event-maestro 產生 14 天資料 -> 上傳 landing -> 載入 bronze -> dbt build（含測試）
 make trino       # 開 Trino CLI 查資料
 ```
+
+自己在 event-maestro 網站上點來點去之後，跑 `make ingest` 就會把新的事件（`collector.jsonl`）一起帶進來。
 
 在 Trino 裡試試看：
 
 ```sql
--- 哪篇文章最多人讀完？
-SELECT article_title, sum(views) AS views, round(avg(completion_rate), 3) AS completion_rate
+-- 每篇文章的閱讀漏斗
+SELECT article_title, sum(views) AS views, sum(sessions_read_50) AS read_50,
+       sum(sessions_read_100) AS read_100, sum(likes) AS likes
 FROM marts.fct_article_daily
 GROUP BY 1 ORDER BY 2 DESC;
 
@@ -80,28 +84,24 @@ FROM staging."stg_ga4__events$snapshots";
 其他指令：
 
 ```bash
-make generate START=2026-09-01 DAYS=3 SEED=7   # 產生另一批資料（同一個 seed 重跑會覆蓋，不會重複）
+make generate DAYS=30 USERS=500 SEED=7          # 用 event-maestro 產生另一批資料
+make upload                                     # 只把 event-maestro 的輸出上傳到 landing
 make load                                       # 只跑 landing -> bronze
 make dbt                                        # 只跑 dbt
 make down                                       # 停止（資料保留）
 make clean                                      # 停止並刪除所有資料
 ```
 
-## 資料契約（給 event-maestro）
+## 資料來源：event-maestro
 
-event-maestro 只要把事件寫成 JSONL 放到 `s3://landing/ga4/event_date=YYYYMMDD/` 底下，後面的 pipeline 就會接手。
-每一行是一筆 [GA4 BigQuery export](https://support.google.com/analytics/answer/7029846) 格式的 row，
-目前會讀的欄位定義在 [`ingestion/load_raw.py`](ingestion/load_raw.py) 的 `SCHEMA`：
+資料格式以 event-maestro 的[資料契約](https://github.com/HommerChiu/event-maestro/blob/main/docs/data-contract.md)為準：
+`<output>/raw/ga4_events/event_date=YYYY-MM-DD/<source>.jsonl`，每一行是一筆 GA4 BigQuery export row。
 
-- `event_date`、`event_timestamp`（微秒）、`event_name`
-- `event_params`：`[{key, value: {string_value | int_value | float_value | double_value}}]`，每個事件都要有 `ga_session_id`、`ga_session_number`
-- `user_pseudo_id`、`user_id`、`user_first_touch_timestamp`
-- `device`、`geo`、`traffic_source`、`collected_traffic_source`、`platform`、`stream_id`
-
-知識分享網站的事件：`first_visit`、`session_start`、`page_view`、`user_engagement`、`scroll`、`select_content`、
-`view_search_results`、`article_complete`、`bookmark`、`share`、`sign_up`。
-文章相關事件帶 `article_id`、`article_category`、`article_author` 參數。
-出現新的事件名稱時 dbt 的 `accepted_values` 測試會發 warning，但不會擋 pipeline。
+- `upload_landing.py` 原樣鏡像到 `s3://landing/ga4_events/`，同名檔案覆蓋，所以重跑安全。
+- `load_raw.py` 的 `SCHEMA` 對應 event-maestro 的 `schema/ga4_event.schema.json`；`app_info`、`event_dimensions`、`ecommerce`、`items` 在知識網站永遠是空的，不載入。
+  資料夾日期和列裡的 `event_date` 不一致時會直接報錯，因為分區 overwrite 靠這個假設。
+- event-maestro 的 `--duplicate-rate` 會故意寫入重複列（`make pipeline` 預設 1%），bronze 保留原樣，`stg_ga4__events` 用 `event_key` 去重。
+- 出現事件字典以外的新事件時，dbt 的 `accepted_values` 測試會發 warning，但不會擋 pipeline。
 
 ## 目錄
 
@@ -112,11 +112,11 @@ infra/
   polaris/create_catalog.py 建 Polaris catalog 與權限
   trino/catalog/            Trino 的 Iceberg REST catalog 設定
 ingestion/
-  generate_events.py        知識分享網站的 GA4 假資料
+  upload_landing.py         event-maestro 本機輸出 -> landing bucket
   load_raw.py               landing -> Iceberg bronze
 dbt/
   models/staging/           silver：stg_ga4__events（incremental merge）
-  models/marts/             gold：sessions / users / 文章 / 搜尋
+  models/marts/             gold：sessions / users / 文章閱讀漏斗 / 搜尋
 ```
 
 ## 接下來可以玩的
