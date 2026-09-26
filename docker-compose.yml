@@ -1,0 +1,128 @@
+# data-symphony 本機 lakehouse
+#
+#   RustFS (S3)  <-  Polaris (Iceberg REST catalog, 狀態存在 Postgres)
+#        ^                 ^
+#        |                 |
+#   ingestion (pyiceberg)  Trino  <-  dbt-trino
+#
+# 啟動：make up   （細節見 README.md）
+
+name: data-symphony
+
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-rustfsadmin}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+  AWS_REGION: us-east-1
+
+services:
+  # ---------- 物件儲存 ----------
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9000/health || wget -qO- http://localhost:9000/health"]
+      interval: 5s
+      retries: 20
+
+  # 建立 bucket：landing（原始 JSONL）、warehouse（Iceberg 表）
+  rustfs-init:
+    image: python:3.12-slim
+    depends_on:
+      rustfs: { condition: service_healthy }
+    environment:
+      <<: *s3-env
+      S3_ENDPOINT: http://rustfs:9000
+    volumes:
+      - ./infra/rustfs/create_buckets.py:/create_buckets.py:ro
+    entrypoint: ["python", "/create_buckets.py", "landing", "warehouse"]
+    restart: "no"
+
+  # ---------- Catalog ----------
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: polaris
+      POSTGRES_PASSWORD: polaris
+      POSTGRES_DB: polaris
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polaris"]
+      interval: 5s
+      retries: 20
+
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:1.7.0
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment: &polaris-db-env
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/polaris
+      QUARKUS_DATASOURCE_USERNAME: polaris
+      QUARKUS_DATASOURCE_PASSWORD: polaris
+    # 已經 bootstrap 過的 realm 會自動略過，重啟時可以安全重跑
+    command: ["bootstrap", "-r", "POLARIS", "-c", "POLARIS,${POLARIS_CLIENT_ID:-root},${POLARIS_CLIENT_SECRET:-s3cr3t}"]
+    restart: "no"
+
+  polaris:
+    image: apache/polaris:1.7.0
+    depends_on:
+      polaris-bootstrap: { condition: service_completed_successfully }
+      rustfs: { condition: service_healthy }
+    environment:
+      <<: [*polaris-db-env, *s3-env]
+      POLARIS_REALM_CONTEXT_REALMS: POLARIS
+    ports:
+      - "8181:8181"   # Iceberg REST + management API
+      - "8182:8182"   # health / metrics
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8182/q/health"]
+      interval: 5s
+      retries: 30
+
+  # 建立 Polaris catalog `lakehouse` 與權限
+  polaris-init:
+    image: python:3.12-slim
+    depends_on:
+      polaris: { condition: service_healthy }
+      rustfs-init: { condition: service_completed_successfully }
+    environment:
+      POLARIS_URL: http://polaris:8181
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID:-root}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET:-s3cr3t}
+      S3_ENDPOINT: http://localhost:9000        # 給本機 pyiceberg 用
+      S3_ENDPOINT_INTERNAL: http://rustfs:9000  # 給 Polaris 自己用
+    volumes:
+      - ./infra/polaris/create_catalog.py:/create_catalog.py:ro
+    entrypoint: ["python", "/create_catalog.py"]
+    restart: "no"
+
+  # ---------- 查詢引擎 ----------
+  trino:
+    image: trinodb/trino:476
+    depends_on:
+      polaris-init: { condition: service_completed_successfully }
+    environment:
+      <<: *s3-env
+      POLARIS_CREDENTIAL: ${POLARIS_CLIENT_ID:-root}:${POLARIS_CLIENT_SECRET:-s3cr3t}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/trino/catalog:/etc/trino/catalog:ro
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 5s
+      retries: 30
+
+volumes:
+  rustfs-data:
+  postgres-data:

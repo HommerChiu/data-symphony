@@ -1,0 +1,24 @@
+version: 2
+
+models:
+  - name: stg_ga4__events
+    description: 一列一個 GA4 事件，常用 event_params 已攤平、完全重複的列已去掉。增量 merge，以 event_date 分區。
+    columns:
+      - name: event_key
+        description: 事件的 surrogate key（user、時間、事件名稱、參數的 hash）
+        data_tests: [unique, not_null]
+      - name: event_date
+        data_tests: [not_null]
+      - name: session_key
+        description: user_pseudo_id + ga_session_id
+        data_tests: [not_null]
+      - name: event_name
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [first_visit, session_start, page_view, user_engagement, scroll, click,
+                         file_download, view_search_results, search, select_content, read_progress,
+                         like_article, unlike_article, bookmark_article, remove_bookmark, share,
+                         copy_code, submit_comment, subscribe_newsletter, sign_up, login]
+              config:
+                severity: warn   # event-maestro 新增事件時提醒，不擋 pipeline

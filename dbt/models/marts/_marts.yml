@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: fct_sessions
+    description: 一列一個 session（user_pseudo_id + ga_session_id）
+    columns:
+      - name: session_key
+        data_tests: [unique, not_null]
+      - name: page_views
+        data_tests: [not_null]
+
+  - name: dim_users
+    description: 一列一個匿名使用者（user_pseudo_id），含首次來源與累積行為
+    columns:
+      - name: user_pseudo_id
+        data_tests: [unique, not_null]
+
+  - name: fct_article_daily
+    description: 每篇文章每天的閱讀漏斗
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [event_date, article_id]
+    columns:
+      - name: article_id
+        data_tests: [not_null]
+
+  - name: fct_search_terms_daily
+    description: 每天每個站內搜尋關鍵字的次數與點擊率
+    columns:
+      - name: search_term
+        data_tests: [not_null]
